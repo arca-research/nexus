@@ -945,14 +945,21 @@ class GraphIndex:
             return result is not None
     
 
-    def list_all_entities(self) -> list[str]:
+    def list_all_entities(self, include_aliases: bool = False) -> list[str]:
         """
         List all canonical entity names in the graph.
         Does not include aliases.
         """
         with self._conn() as con:
             rows = con.execute("SELECT name FROM entities ORDER BY name;").fetchall()
-            return [row[0] for row in rows]
+            entities = [row[0] for row in rows]
+        
+            if include_aliases:
+                return entities
+            
+            alias_rows = con.execute("SELECT alias FROM aliases;").fetchall()
+            alias_names = {row[0] for row in alias_rows}
+            return [name for name in entities if name not in alias_names]
     
 
     def list_all_aliases(self, entity_name: str) -> list[str]:
