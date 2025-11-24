@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 try:
     from ..src.state.graph_index import GraphIndex
+    from ..src._backend.sqlite_connection import Sqlite_Connection
     from ..src._schemas import (
         EntityNotFoundError,
         RelationshipCollisionError,
@@ -36,6 +37,7 @@ LOGGER.propagate = False
 GRAPH_INDEX_ENV_VAR = "GRAPH_INDEX_PATH"
 FRONTEND_DIR = Path(__file__).resolve().parent
 
+GRAPH_DB_TYPE = "sqlite" # Can be updated 
 
 class GraphMeta(BaseModel):
     generated_at: str
@@ -205,7 +207,10 @@ def startup_event() -> None:
     index_path = _resolve_index_path()
     LOGGER.info("Resolved graph index path: %s", index_path)
     app.state.graph_index_path = index_path
-    app.state.graph_index = GraphIndex(index_path)
+    if GRAPH_DB_TYPE == "sqlite":
+        app.state.graph_index = GraphIndex(Sqlite_Connection(index_path))
+    else:
+        raise ValueError("Invalid graph DB type selected")
     LOGGER.info("GraphIndex initialised successfully.")
 
 

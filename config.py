@@ -34,7 +34,6 @@ if not log.handlers:
     )
     log.addHandler(handler)
 
-
 @dataclass
 class VectorDBConfig:
     rebuild: bool = True
@@ -66,6 +65,7 @@ class GraphConfig:
     stage_dir: Path = field(default_factory=lambda: Path(".nexus"))
     graph_index_path: Path = None # set in __post_init__
     graph_meta_path: Path = None # set in __post_init__
+    graph_db_type: str = "sqlite" # Options (may add mroe later): sqlite
 
     max_tokens: int = 2056 # | TODO
 

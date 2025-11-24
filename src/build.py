@@ -20,6 +20,8 @@ from ._schemas import (
     RelationshipRecord,
     RelationshipCollisionError
 )
+from ._backend import Sqlite_Connection
+
 
 
 # === VECTOR DB BUILDER ===
@@ -127,8 +129,12 @@ class GraphBuilder:
         missing = [r for r in required if not hasattr(self.graph_config, r)]
         if missing:
             raise ValueError(f"Config missing required fields: {', '.join(missing)}")
-
-        self.graph_index = GraphIndex(self.graph_config.graph_index_path)
+        
+        if self.graph_config.graph_db_type == "sqlite":
+            db = Sqlite_Connection(self.graph_config.graph_index_path)
+        else:
+            raise ValueError("Invalud graph database option")
+        self.graph_index = GraphIndex(db)
         
         self.tuple_delimiter = self.graph_config.tuple_delimiter
         self.record_delimiter = self.graph_config.record_delimiter

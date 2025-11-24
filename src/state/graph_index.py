@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Literal
+from .._backend import Graph_Index_Connection
 
 from ...config import log
 from .._schemas import (
@@ -27,34 +28,13 @@ def debug_only(func):
 class GraphIndex:
     """Graph Index handler"""
 
-    def __init__(self, index_path: str | Path):
-        self.index_path = Path(index_path)
+    def __init__(self, db_connection: Graph_Index_Connection):
+        self.db_con = db_connection
         self._initialize()
 
-
-    @contextmanager
-    def _conn(self):
-        """
-        Helper to open a SQLite connection with row access by column name.
-        """
-        con = sqlite3.connect(self.index_path)
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA foreign_keys=ON;")
-        con.execute("PRAGMA busy_timeout=5000;")
-        con.row_factory = sqlite3.Row
-        try:
-            yield con
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
-        finally:
-            con.close()
-
-
     def _initialize(self) -> None:
-        with self._conn() as con:
-            con.execute("""
+        with self.db_con._conn() as con:
+            self.db_con.execute("""
                 CREATE TABLE IF NOT EXISTS entities (
                     id INTEGER PRIMARY KEY,
                     name TEXT UNIQUE NOT NULL,
@@ -62,8 +42,8 @@ class GraphIndex:
                     entity_type TEXT,
                     tags TEXT
                 );
-            """)
-            con.execute("""
+            """, (), con)
+            self.db_con.execute("""
                 CREATE TABLE IF NOT EXISTS relationships (
                     id INTEGER PRIMARY KEY,
                     source_id INTEGER NOT NULL,
@@ -76,8 +56,8 @@ class GraphIndex:
                     FOREIGN KEY(source_id) REFERENCES entities(id),
                     FOREIGN KEY(target_id) REFERENCES entities(id)
                 );
-            """)
-            con.execute("""
+            """, (), con)
+            self.db_con.execute("""
                 CREATE TABLE IF NOT EXISTS aliases (
                     id INTEGER PRIMARY KEY,
                     entity_id INTEGER NOT NULL,
@@ -86,7 +66,7 @@ class GraphIndex:
                     FOREIGN KEY(entity_id) REFERENCES entities(id)
                 );
             """)
-            con.execute("""
+            self.db_con.execute("""
                 CREATE TABLE IF NOT EXISTS claims (
                     id INTEGER PRIMARY KEY,
                     entity_id INTEGER,
@@ -100,26 +80,24 @@ class GraphIndex:
                     FOREIGN KEY(entity_id) REFERENCES entities(id),
                     FOREIGN KEY(relationship_id) REFERENCES relationships(id)
                 );
-            """)
+            """, (), con)
 
             # indexes
-            con.execute("CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_id);")
-            con.execute("CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_id);")
-            con.execute("CREATE INDEX IF NOT EXISTS idx_claims_entity ON claims(entity_id);")
-            con.execute("CREATE INDEX IF NOT EXISTS idx_claims_relationship ON claims(relationship_id);")
-
-
+            self.db_con.execute("CREATE INDEX IF NOT EXISTS idx_rel_source ON relationships(source_id);", (), con)
+            self.db_con.execute("CREATE INDEX IF NOT EXISTS idx_rel_target ON relationships(target_id);", (), con)
+            self.db_con.execute("CREATE INDEX IF NOT EXISTS idx_claims_entity ON claims(entity_id);", (), con)
+            self.db_con.execute("CREATE INDEX IF NOT EXISTS idx_claims_relationship ON claims(relationship_id);", (), con)
 
     def upsert_entity(self, name: str, entity_type: Optional[str]=None) -> int:
         """Insert or update an entity by name, returning its id."""
-        with self._conn() as con:
-            cur = con.execute("""
+        with self.db_con._conn() as con:
+            cur = self.db_con.execute("""
                 INSERT INTO entities (name, entity_type, date_added)
                 VALUES (?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(name)
                 DO UPDATE SET entity_type = COALESCE(excluded.entity_type, entities.entity_type)
                 RETURNING id;
-            """, (name, entity_type))
+            """, (name, entity_type), (), con)
             return cur.fetchone()[0]
 
 
@@ -147,14 +125,14 @@ class GraphIndex:
         # normalize for undirected relationships
         source_id, target_id, directed = self._normalize_pair(source_id, target_id, directed)
 
-        with self._conn() as con:
-            cur = con.execute("""
+        with self.db_con._conn() as con:
+            cur = self.db_con.execute("""
                 INSERT INTO relationships (source_id, target_id, strength, directed, date_added)
                 VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(source_id, target_id, directed)
                 DO UPDATE SET strength = excluded.strength
                 RETURNING id;
-            """, (source_id, target_id, strength, int(bool(directed))))
+            """, (source_id, target_id, strength, int(bool(directed))), con)
             return cur.fetchone()[0]
 
 
@@ -187,26 +165,28 @@ class GraphIndex:
         
         entity_id = self.upsert_entity(entity_name)
         
-        with self._conn() as con:
+        with self.db_con._conn() as con:
             # check: don't upsert an alias that belongs to another entity
-            alias_is_existing_alias = con.execute(
+            alias_is_existing_alias = self.db_con.execute(
                 "SELECT entity_id FROM aliases WHERE alias = ?;", 
-                (alias,)
+                (alias,),
+                con
             ).fetchone() # check if alias already exists
             if alias_is_existing_alias and alias_is_existing_alias[0] != entity_id:
-                existing_entity = con.execute(
+                existing_entity = self.db_con.execute(
                     "SELECT name FROM entities WHERE id = ?;", 
-                    (alias_is_existing_alias[0],)
+                    (alias_is_existing_alias[0],),
+                    con
                 ).fetchone()[0] # get entity names for error message
                 raise AliasConflictError(alias, existing_entity, entity_name)
 
-            con.execute("""
+            self.db_con.execute("""
                 INSERT INTO aliases (entity_id, alias, date_added)
                 VALUES (?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(alias) DO NOTHING;
-            """, (entity_id, alias))
+            """, (entity_id, alias), con)
             
-            cur = con.execute("SELECT id FROM aliases WHERE alias = ?;", (alias,))
+            cur = self.db_con.execute("SELECT id FROM aliases WHERE alias = ?;", (alias,), con)
             return cur.fetchone()[0]
 
 
@@ -247,32 +227,33 @@ class GraphIndex:
             except Exception: # fallback to now
                 claim_date_iso8601 = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         
-        with self._conn() as con:
-            cur = con.execute("""
+        with self.db_con._conn() as con:
+            cur = self.db_con.execute("""
                 INSERT INTO claims (entity_id, relationship_id, content, source, claim_date, date_added)
                 VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 RETURNING id;
-            """, (entity_id, relationship_id, content, source, claim_date_iso8601))
+            """, (entity_id, relationship_id, content, source, claim_date_iso8601), con)
             return cur.fetchone()[0]
 
 
     def drop(self):
         """drop all data from all tables."""
-        with self._conn() as con:
-            con.execute("DELETE FROM claims;")
-            con.execute("DELETE FROM relationships;")
-            con.execute("DELETE FROM aliases;")
-            con.execute("DELETE FROM entities;")
+        with self.db_con._conn() as con:
+            self.db_con.execute("DELETE FROM claims;", (), con)
+            self.db_con.execute("DELETE FROM relationships;", (), con)
+            self.db_con.execute("DELETE FROM aliases;", (), con)
+            self.db_con.execute("DELETE FROM entities;", (), con)
 
 
     def load_aliases(self, name: str) -> list[str]:
         """Load all aliases for an entity (resolve to canonical first)"""
         canonical = self.resolve_alias(name)
 
-        with self._conn() as con:
-            entity_row = con.execute(
+        with self.db_con._conn() as con:
+            entity_row = self.db_con.execute(
                 "SELECT id FROM entities WHERE name = ?;",
-                (canonical,)
+                (canonical,),
+                con
             ).fetchone()
             
             if not entity_row:
@@ -280,9 +261,10 @@ class GraphIndex:
             
             entity_id = entity_row[0]
             
-            rows = con.execute(
+            rows = self.db_con.execute(
                 "SELECT alias FROM aliases WHERE entity_id = ?;",
-                (entity_id,)
+                (entity_id,),
+                con
             ).fetchall()
             
             return [row[0] for row in rows]
@@ -293,22 +275,25 @@ class GraphIndex:
         Return the canonical name of an entity.
         NOTE: may want to be more explicit about entity-DNE.
         """
-        with self._conn() as con:
-            alias_row = con.execute(
+        with self.db_con._conn() as con:
+            alias_row = self.db_con.execute(
                 "SELECT entity_id FROM aliases WHERE alias = ?;",
-                (name,)
+                (name,),
+                con
             ).fetchone() # check if name is an alias
             
             if alias_row: # -> get canonical entity name
-                entity_row = con.execute(
+                entity_row = self.db_con.execute(
                     "SELECT name FROM entities WHERE id = ?;",
-                    (alias_row[0],)
+                    (alias_row[0],),
+                    con
                 ).fetchone()
                 return entity_row[0]
             
-            entity_row = con.execute(
+            entity_row = self.db_con.execute(
                 "SELECT name FROM entities WHERE name = ?;",
-                (name,)
+                (name,),
+                con
             ).fetchone() # if not alias, check if it's an entity name
             
             if entity_row:
@@ -321,10 +306,11 @@ class GraphIndex:
         """Load claims for entity and all its aliases."""
         canonical = self.resolve_alias(name)
 
-        with self._conn() as con:
-            entity_row = con.execute(
+        with self.db_con._conn() as con:
+            entity_row = self.db_con.execute(
                 "SELECT id FROM entities WHERE name = ?;",
-                (canonical,)
+                (canonical,),
+                con
             ).fetchone()
             
             if not entity_row:
@@ -332,9 +318,10 @@ class GraphIndex:
             
             canonical_id = entity_row[0]
             
-            alias_rows = con.execute(
+            alias_rows = self.db_con.execute(
                 "SELECT alias FROM aliases WHERE entity_id = ?;",
-                (canonical_id,)
+                (canonical_id,),
+                con
             ).fetchall() # get all alias names for canonical entity
             
             alias_names = [row[0] for row in alias_rows]
@@ -343,9 +330,10 @@ class GraphIndex:
             all_names = [canonical] + alias_names
             placeholders = ','.join('?' * len(all_names))
             
-            entity_ids = con.execute(
+            entity_ids = self.db_con.execute(
                 f"SELECT id FROM entities WHERE name IN ({placeholders});",
-                all_names
+                all_names,
+                con
             ).fetchall()
             
             entity_id_list = [row[0] for row in entity_ids]
@@ -355,11 +343,11 @@ class GraphIndex:
             
             # load claims from all these entity IDs
             id_placeholders = ','.join('?' * len(entity_id_list))
-            rows = con.execute(f"""
+            rows = self.db_con.execute(f"""
                 SELECT content, source, date_added 
                 FROM claims 
                 WHERE entity_id IN ({id_placeholders});
-            """, entity_id_list).fetchall()
+            """, entity_id_list, con).fetchall()
             
             return [
                 ClaimData(
@@ -378,10 +366,11 @@ class GraphIndex:
     ) -> list[RelationshipRecord]:
         """Load relationships for an entity and all its aliases."""
         canonical = self.resolve_alias(name)
-        with self._conn() as con:
-            canonical_row = con.execute(
+        with self.db_con._conn() as con:
+            canonical_row = self.db_con.execute(
                 "SELECT id FROM entities WHERE name = ?;",
-                (canonical,)
+                (canonical,),
+                con
             ).fetchone()
             
             if not canonical_row:
@@ -416,7 +405,7 @@ class GraphIndex:
                 WHERE {' AND '.join(where)}
                 {order};
             """
-            rows = con.execute(sql, params).fetchall()
+            rows = self.db_con.execute(sql, params, con).fetchall()
 
             seen: dict[tuple[int, int, int], sqlite3.Row] = {}
             for row in rows:
@@ -452,7 +441,7 @@ class GraphIndex:
         if source_canonical == target_canonical:
             raise RelationshipCollisionError(source_name, target_name)
         
-        with self._conn() as con:
+        with self.db_con._conn() as con:
             # gather relationship ids per directed setting
             rel_ids: list[int] = []
             if directed is None:
@@ -469,11 +458,11 @@ class GraphIndex:
                 return []
             
             placeholders = ",".join("?" * len(rel_ids))
-            rows = con.execute(f"""
+            rows = self.db_con.execute(f"""
                 SELECT content, source, date_added
                 FROM claims
                 WHERE relationship_id IN ({placeholders});
-            """, rel_ids).fetchall()
+            """, rel_ids, con).fetchall()
 
             return [
                 ClaimData(
@@ -495,9 +484,9 @@ class GraphIndex:
         - Claims from both are consolidated
         - Alias entity is deleted (alias mapping remains)
         """
-        with self._conn() as con:
-            canonical_row = con.execute(
-                "SELECT id FROM entities WHERE name = ?;", (canonical_name,)
+        with self.db_con._conn() as con:
+            canonical_row = self.db_con.execute(
+                "SELECT id FROM entities WHERE name = ?;", (canonical_name,), con
             ).fetchone()
             if not canonical_row:
                 is_an_alias_of = self.resolve_alias(canonical_name)
@@ -514,8 +503,8 @@ class GraphIndex:
             canonical_id = canonical_row[0]
             
             # verify alias_name is actually an alias of canonical_name
-            alias_mapping = con.execute(
-                "SELECT entity_id FROM aliases WHERE alias = ?;", (alias_name,)
+            alias_mapping = self.db_con.execute(
+                "SELECT entity_id FROM aliases WHERE alias = ?;", (alias_name,), con
             ).fetchone()
             if not alias_mapping:
                 raise ValueError(f"'{alias_name}' is not an alias")
@@ -523,8 +512,8 @@ class GraphIndex:
                 raise ValueError(f"'{alias_name}' is not an alias of '{canonical_name}'")
             
             # get alias entity id (if it exists as an entity)
-            alias_row = con.execute(
-                "SELECT id FROM entities WHERE name = ?;", (alias_name,)
+            alias_row = self.db_con.execute(
+                "SELECT id FROM entities WHERE name = ?;", (alias_name,), con
             ).fetchone()
             if not alias_row: # if alias doesn't exist as entity, nothing to merge
                 log.info("%s has no entity data to merge", alias_name)
@@ -532,11 +521,11 @@ class GraphIndex:
             alias_id = alias_row[0]
             
             # migrate relationships from alias to canonical (normalize undirected)
-            alias_relationships = con.execute("""
+            alias_relationships = self.db_con.execute("""
                 SELECT id, source_id, target_id, strength, directed
                 FROM relationships
                 WHERE source_id = ? OR target_id = ?;
-            """, (alias_id, alias_id)).fetchall()
+            """, (alias_id, alias_id), con).fetchall()
             
             for rel in alias_relationships:
                 rel_id, source_id, target_id, strength, directed = rel
@@ -554,38 +543,38 @@ class GraphIndex:
                 )
 
                 # check if canonical already has relationship to this target
-                existing_rel = con.execute("""
+                existing_rel = self.db_con.execute("""
                     SELECT id FROM relationships
                     WHERE source_id = ? AND target_id = ? AND directed = ?;
-                """, (new_source_id, new_target_id, directed_int)).fetchone()
+                """, (new_source_id, new_target_id, directed_int), con).fetchone()
                 
                 if existing_rel:
                     # move claims to existing; keep existing strength
-                    con.execute("""
+                    self.db_con.execute("""
                         UPDATE claims
                         SET relationship_id = ?
                         WHERE relationship_id = ?;
-                    """, (existing_rel[0], rel_id))
+                    """, (existing_rel[0], rel_id), con)
                     
                     # delete alias relationship
-                    con.execute("DELETE FROM relationships WHERE id = ?;", (rel_id,))
+                    self.db_con.execute("DELETE FROM relationships WHERE id = ?;", (rel_id,), con)
                 else:
                     # move relationship from alias to canonical
-                    con.execute("""
+                    self.db_con.execute("""
                         UPDATE relationships
                         SET source_id = ?, target_id = ?, directed = ?
                         WHERE id = ?;
-                    """, (new_source_id, new_target_id, directed_int, rel_id))
+                    """, (new_source_id, new_target_id, directed_int, rel_id), con)
             
             # migrate entity claims from alias to canonical
-            con.execute("""
+            self.db_con.execute("""
                 UPDATE claims
                 SET entity_id = ?
                 WHERE entity_id = ?;
-            """, (canonical_id, alias_id))
+            """, (canonical_id, alias_id), con)
             
             # delete alias entity (alias mapping remains in aliases table!)
-            con.execute("DELETE FROM entities WHERE id = ?;", (alias_id,))
+            self.db_con.execute("DELETE FROM entities WHERE id = ?;", (alias_id,), con)
             
             log.info("Successfully merged %s into %s", alias_name, canonical_name)
 
@@ -650,9 +639,9 @@ class GraphIndex:
             )
             raise DeletionConflict(name, "entities", message=msg)
         
-        with self._conn() as con:
-            row = con.execute(
-                "SELECT id FROM entities WHERE name = ?;", (canonical,)
+        with self.db_con._conn() as con:
+            row = self.db_con.execute(
+                "SELECT id FROM entities WHERE name = ?;", (canonical,), con
             ).fetchone()
             if not row:
                 raise EntityNotFoundError(canonical)
@@ -666,21 +655,23 @@ class GraphIndex:
             # guard: relationships touching canonical or any alias-entity
             if expanded_ids:
                 placeholders = ",".join("?" * len(expanded_ids))
-                rels_guard = con.execute(
+                rels_guard = self.db_con.execute(
                     f"""
                     SELECT id FROM relationships
                     WHERE source_id IN ({placeholders})
                        OR target_id IN ({placeholders});
                     """,
-                    expanded_ids + expanded_ids
+                    expanded_ids + expanded_ids,
+                    con
                 ).fetchall()
             else:
                 rels_guard = []
 
             # guard: claims directly on the canonical entity
-            claims_guard = con.execute(
+            claims_guard = self.db_con.execute(
                 "SELECT id FROM claims WHERE entity_id = ?;",
-                (canonical_id,)
+                (canonical_id,),
+                con
             ).fetchall()
 
             if not cascade:
@@ -706,19 +697,20 @@ class GraphIndex:
                     raise DeletionConflict(canonical, "entities", message=msg)
 
             # delete relationship claims, then relationships
-            rels = con.execute(
+            rels = self.db_con.execute(
                 "SELECT id FROM relationships WHERE source_id = ? OR target_id = ?;",
-                (canonical_id, canonical_id)
+                (canonical_id, canonical_id),
+                con
             ).fetchall()
             for rel in rels:
                 rel_id = rel[0]
-                con.execute("DELETE FROM claims WHERE relationship_id = ?;", (rel_id,))
-                con.execute("DELETE FROM relationships WHERE id = ?;", (rel_id,))
+                self.db_con.execute("DELETE FROM claims WHERE relationship_id = ?;", (rel_id,), con)
+                self.db_con.execute("DELETE FROM relationships WHERE id = ?;", (rel_id,), con)
 
             # delete entity claims // entity aliases // entity itself
-            con.execute("DELETE FROM claims WHERE entity_id = ?;", (canonical_id,))
-            con.execute("DELETE FROM aliases WHERE entity_id = ?;", (canonical_id,))
-            con.execute("DELETE FROM entities WHERE id = ?;", (canonical_id,))
+            self.db_con.execute("DELETE FROM claims WHERE entity_id = ?;", (canonical_id,), con)
+            self.db_con.execute("DELETE FROM aliases WHERE entity_id = ?;", (canonical_id,), con)
+            self.db_con.execute("DELETE FROM entities WHERE id = ?;", (canonical_id,), con)
 
 
     def delete_relationship(self,
@@ -742,7 +734,7 @@ class GraphIndex:
         if source_canonical == target_canonical:
             raise RelationshipCollisionError(source, target)
 
-        with self._conn() as con:
+        with self.db_con._conn() as con:
             rel_ids: list[int] = []
             if directed is None:
                 rel_ids.extend(self._relationship_ids_alias_expanded(con, source_canonical, target_canonical, False))
@@ -760,9 +752,10 @@ class GraphIndex:
             # if cascade is off, ensure none of the matched rels have claims
             if not cascade:
                 placeholders = ",".join("?" * len(rel_ids))
-                claims_guard = con.execute(
+                claims_guard = self.db_con.execute(
                     f"SELECT 1 FROM claims WHERE relationship_id IN ({placeholders}) LIMIT 1;",
-                    rel_ids
+                    rel_ids,
+                    con
                 ).fetchone()
                 if claims_guard:
                     claim_count = len(claims_guard)
@@ -775,13 +768,15 @@ class GraphIndex:
 
             # cascade delete claims for all matched relationships, then the relationships
             placeholders = ",".join("?" * len(rel_ids))
-            con.execute(
+            self.db_con.execute(
                 f"DELETE FROM claims WHERE relationship_id IN ({placeholders});",
-                rel_ids
+                rel_ids,
+                con
             )
-            con.execute(
+            self.db_con.execute(
                 f"DELETE FROM relationships WHERE id IN ({placeholders});",
-                rel_ids
+                rel_ids,
+                con
             )
 
 
@@ -796,30 +791,31 @@ class GraphIndex:
             msg = (f"Cannot delete alias: '{entity_name}' is an alias of '{canonical}'.")
             raise DeletionConflict(alias, "aliases", message=msg)
 
-        with self._conn() as con:
-            ent_row = con.execute(
-                "SELECT id FROM entities WHERE name = ?;", (entity_name,)
+        with self.db_con._conn() as con:
+            ent_row = self.db_con.execute(
+                "SELECT id FROM entities WHERE name = ?;", (entity_name,), con
             ).fetchone()
             if not ent_row:
                 raise EntityNotFoundError(entity_name)
             entity_id = ent_row[0]
 
-            mapping = con.execute(
+            mapping = self.db_con.execute(
                 "SELECT entity_id, id FROM aliases WHERE alias = ?;",
-                (alias,)
+                (alias,),
+                con
             ).fetchone()
             if not mapping:
                 raise AliasConflictError(alias, "<unmapped>", entity_name,
                     message=f"'{alias}' is not an alias of '{entity_name}' (no mapping found).")
             
             if mapping[0] != entity_id:
-                other_name = con.execute(
-                "SELECT name FROM entities WHERE id = ?;", (mapping[0],)
+                other_name = self.db_con.execute(
+                "SELECT name FROM entities WHERE id = ?;", (mapping[0],), con
             ).fetchone()[0]
                 raise AliasConflictError(alias, other_name, entity_name,
                     message=f"'{alias}' is mapped to '{other_name}', not '{entity_name}'.")
             
-            con.execute("DELETE FROM aliases WHERE id = ?;", (mapping[1],))
+            self.db_con.execute("DELETE FROM aliases WHERE id = ?;", (mapping[1],), con)
 
 
     def delete_claim(self,
@@ -852,13 +848,13 @@ class GraphIndex:
         if not any([content, entity_name, relationship, source, date_range]):
             raise ValueError("Must provide at least one filter criterion")
 
-        with self._conn() as con:
+        with self.db_con._conn() as con:
             clauses = []
             params = []
 
             def add_entity_clause(name: str):
                 canonical = self.resolve_alias(name)
-                row = con.execute("SELECT id FROM entities WHERE name = ?;", (canonical,)).fetchone()
+                row = self.db_con.execute("SELECT id FROM entities WHERE name = ?;", (canonical,), con).fetchone()
                 if not row:
                     return None
                 return ("entity_id = ?", [row[0]])
@@ -930,15 +926,16 @@ class GraphIndex:
                 return
 
             sql = "DELETE FROM claims WHERE " + " AND ".join(clauses)
-            con.execute(sql, tuple(params))
+            self.db_con.execute(sql, tuple(params), con)
     
 
     def entity_exists(self, name: str) -> bool:
         """Check if entity exists in DB"""
-        with self._conn() as con:
-            result = con.execute(
+        with self.db_con._conn() as con:
+            result = self.db_con.execute(
                 "SELECT 1 FROM entities WHERE name = ? LIMIT 1;",
-                (name,)
+                (name,),
+                con
             ).fetchone()
             return result is not None
     
@@ -948,26 +945,28 @@ class GraphIndex:
         List all canonical entity names in the graph.
         Does not include aliases.
         """
-        with self._conn() as con:
-            rows = con.execute("SELECT name FROM entities ORDER BY name;").fetchall()
+        with self.db_con._conn() as con:
+            rows = self.db_con.execute("SELECT name FROM entities ORDER BY name;", (), con).fetchall()
             return [row[0] for row in rows]
     
 
     def list_all_aliases(self, entity_name: str) -> list[str]:
         """Return all aliases for an entity"""
         canonical = self.resolve_alias(entity_name)
-        with self._conn() as con:
-            ent_row = con.execute(
+        with self.db_con._conn() as con:
+            ent_row = self.db_con.execute(
                 "SELECT id FROM entities WHERE name = ?;",
-                (canonical,)
+                (canonical,),
+                con
             ).fetchone()
             if not ent_row:
                 raise EntityNotFoundError(canonical)
             canonical_id = ent_row[0]
 
-            rows = con.execute(
+            rows = self.db_con.execute(
                 "SELECT alias FROM aliases WHERE entity_id = ? ORDER BY alias;",
-                (canonical_id,)
+                (canonical_id,),
+                con
             ).fetchall()
 
             aliases = [r[0] for r in rows]
@@ -992,17 +991,17 @@ class GraphIndex:
     def _expand_ids(self, con, name: str) -> list[int]:
         """Return [canonical_id] plus ids of any alias-entities for this name."""
         canonical = self.resolve_alias(name)
-        row = con.execute("SELECT id FROM entities WHERE name = ?;", (canonical,)).fetchone()
+        row = self.db_con.execute("SELECT id FROM entities WHERE name = ?;", (canonical,), con).fetchone()
         if not row:
             raise EntityNotFoundError(canonical)
         ids = [row[0]]
 
-        alias_rows = con.execute(
-            "SELECT alias FROM aliases WHERE entity_id = ?;", (row[0],)
+        alias_rows = self.db_con.execute(
+            "SELECT alias FROM aliases WHERE entity_id = ?;", (row[0],), con
         ).fetchall()
         for alias_row in alias_rows:
-            alias_entity = con.execute(
-                "SELECT id FROM entities WHERE name = ?;", (alias_row[0],)
+            alias_entity = self.db_con.execute(
+                "SELECT id FROM entities WHERE name = ?;", (alias_row[0],), con
             ).fetchone()
             if alias_entity:
                 ids.append(alias_entity[0])
@@ -1048,17 +1047,18 @@ class GraphIndex:
             """
             params = src_ids + tgt_ids + tgt_ids + src_ids
 
-        rows = con.execute(sql, params).fetchall()
+        rows = self.db_con.execute(sql, params, con).fetchall()
         return [r[0] for r in rows]
 
 
     def _has_relationship_between(self, entity1_name: str, entity2_name: str) -> bool:
         """Check if any relationship exists between two entities (considering aliases)."""
-        with self._conn() as con:
+        with self.db_con._conn() as con:
             entity1_canonical = self.resolve_alias(entity1_name)
-            entity1_row = con.execute(
+            entity1_row = self.db_con.execute(
                 "SELECT id FROM entities WHERE name = ?;",
-                (entity1_canonical,)
+                (entity1_canonical,),
+                con
             ).fetchone()
             
             if not entity1_row:
@@ -1066,23 +1066,26 @@ class GraphIndex:
             
             entity1_ids = [entity1_row[0]]
             
-            alias_rows = con.execute(
+            alias_rows = self.db_con.execute(
                 "SELECT alias FROM aliases WHERE entity_id = ?;",
-                (entity1_row[0],)
+                (entity1_row[0],),
+                con
             ).fetchall() # add alias entity IDs for entity1
             
             for alias_row in alias_rows:
-                alias_entity = con.execute(
+                alias_entity = self.db_con.execute(
                     "SELECT id FROM entities WHERE name = ?;",
-                    (alias_row[0],)
+                    (alias_row[0],),
+                    con
                 ).fetchone()
                 if alias_entity:
                     entity1_ids.append(alias_entity[0])
             
             entity2_canonical = self.resolve_alias(entity2_name)
-            entity2_row = con.execute(
+            entity2_row = self.db_con.execute(
                 "SELECT id FROM entities WHERE name = ?;",
-                (entity2_canonical,)
+                (entity2_canonical,),
+                con
             ).fetchone() # get all entity IDs for entity2
             
             if not entity2_row:
@@ -1090,15 +1093,17 @@ class GraphIndex:
             
             entity2_ids = [entity2_row[0]]
             
-            alias_rows = con.execute(
+            alias_rows = self.db_con.execute(
                 "SELECT alias FROM aliases WHERE entity_id = ?;",
-                (entity2_row[0],)
+                (entity2_row[0],),
+                con
             ).fetchall() # add alias entity IDs for entity2
             
             for alias_row in alias_rows:
-                alias_entity = con.execute(
+                alias_entity = self.db_con.execute(
                     "SELECT id FROM entities WHERE name = ?;",
-                    (alias_row[0],)
+                    (alias_row[0],),
+                    con
                 ).fetchone()
                 if alias_entity:
                     entity2_ids.append(alias_entity[0])
@@ -1107,12 +1112,12 @@ class GraphIndex:
             placeholders1 = ','.join('?' * len(entity1_ids))
             placeholders2 = ','.join('?' * len(entity2_ids))
             
-            result = con.execute(f"""
+            result = self.db_con.execute(f"""
                 SELECT 1 FROM relationships 
                 WHERE (source_id IN ({placeholders1}) AND target_id IN ({placeholders2}))
                 OR (source_id IN ({placeholders2}) AND target_id IN ({placeholders1}))
                 LIMIT 1;
-            """, entity1_ids + entity2_ids + entity2_ids + entity1_ids).fetchone()
+            """, entity1_ids + entity2_ids + entity2_ids + entity1_ids, con).fetchone()
             
             return result is not None
     
@@ -1123,10 +1128,11 @@ class GraphIndex:
         Load claims for exact entity name without alias resolution.
         This is for debugging and inspection. Normal code should use load_entity_claims().
         """
-        with self._conn() as con:
-            entity_row = con.execute(
+        with self.db_con._conn() as con:
+            entity_row = self.db_con.execute(
                 "SELECT id FROM entities WHERE name = ?;",
-                (name,)
+                (name,),
+                con
             ).fetchone()
             
             if not entity_row:
@@ -1134,11 +1140,11 @@ class GraphIndex:
             
             entity_id = entity_row[0]
             
-            rows = con.execute("""
+            rows = self.db_con.execute("""
                 SELECT content, source, date_added 
                 FROM claims 
                 WHERE entity_id = ?;
-            """, (entity_id,)).fetchall()
+            """, (entity_id,), con).fetchall()
             
             return [
                 ClaimData(
