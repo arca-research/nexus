@@ -366,7 +366,8 @@ class GraphIndex:
                     content=row["content"],
                     source=row["source"],
                     date_added=row["date_added"],
-                    claim_date=row["claim_date"]
+                    claim_date=row["claim_date"],
+                    entities=[canonical]
                 )
                 for row in rows
             ]
@@ -481,7 +482,8 @@ class GraphIndex:
                     content=row["content"],
                     source=row["source"],
                     date_added=row["date_added"],
-                    claim_date=row["claim_date"]
+                    claim_date=row["claim_date"],
+                    entities=[source_canonical, target_canonical]
                 )
                 for row in rows
             ]
@@ -1154,7 +1156,8 @@ class GraphIndex:
                     content=row["content"],
                     source=row["source"],
                     date_added=row["date_added"],
-                    claim_date=row["claim_date"]
+                    claim_date=row["claim_date"],
+                    entities=[name]
                 )
                 for row in rows
             ]
