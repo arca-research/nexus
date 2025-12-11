@@ -140,7 +140,7 @@ class GraphBuilder:
 
         self.extraction_concurrency = self.graph_config.extraction_concurrency
 
-        _backend = self.graph_config.extraction_llm_backend
+        _backend = self.llm_config.backend
         _api_key = self.llm_config.api_key
         _url = self.llm_config.local_backend_url
         if self.extraction_concurrency == "sync":
@@ -344,7 +344,7 @@ class GraphBuilder:
                 elif kind == "relationship":
                     src, tgt, claim = fields[:3]
                     claim_date = fields[3] if len(fields) > 3 else None
-                                        
+
                     relationships.append({
                         "source_name": src,
                         "target_name": tgt,
