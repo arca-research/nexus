@@ -242,12 +242,13 @@ class GraphBuilder:
         for entity in entities:
             entity_name = entity["entity_name"]
             entity_type = entity["entity_type"]
+            source = entity.get("source", None)
+            source_date = entity.get("source_date", None)
             claim = entity.get("entity_claim")
             claim_date = entity.get("claim_date", None)
-            source = entity.get("source", None)
 
             self.graph_index.upsert_entity(name=entity_name, entity_type=entity_type)
-            self.graph_index.upsert_claim(content=claim,source=source, entity_name=entity_name, claim_date=claim_date)
+            self.graph_index.upsert_claim(content=claim,source=source, entity_name=entity_name, source_date=source_date, claim_date=claim_date)
 
 
     def _upsert_relationships(self, relationships: list[dict]):
@@ -255,10 +256,11 @@ class GraphBuilder:
         for relationship in relationships:
             source_name = relationship["source_name"]
             target_name = relationship["target_name"]
+            source = relationship.get("source", None)
+            source_date = relationship.get("source_date", None)
             claim = relationship["relationship_claim"]
             claim_date = relationship.get("claim_date", None)
-            source = relationship.get("source", None)
-
+            
             rel = RelationshipRecord(
                 source_name=source_name,
                 target_name=target_name,
@@ -275,10 +277,10 @@ class GraphBuilder:
                 log.info("Self-referential relationship detected between %s and %s: upserting to %s",
                     source_name, target_name, source_name # NOTE: not fully accurate... we upsert to _canon_ of source.
                 )
-                self.graph_index.upsert_claim(content=claim, source=source, entity_name=source_name, claim_date=claim_date)
+                self.graph_index.upsert_claim(content=claim, source=source, entity_name=source_name, source_date=source_date, claim_date=claim_date)
                 continue
 
-            self.graph_index.upsert_claim(content=claim, source=source, relationship=rel, claim_date=claim_date)
+            self.graph_index.upsert_claim(content=claim, source=source, relationship=rel, source_date=source_date, claim_date=claim_date)
 
 
     def _build_extraction_prompt(self,
@@ -326,19 +328,28 @@ class GraphBuilder:
                 kind = _clean(kind).lower()
                 fields = [_clean(f) for f in raw_fields]
 
+                if len(fields) < 3:
+                    raise ValueError("tuple missing required fields")
+
                 if kind == "entity":
-                    name, etype, claim = fields
+                    name, etype, claim = fields[:3]
+                    claim_date = fields[3] if len(fields) > 3 else None
+
                     entities.append({
                         "entity_name": name,
                         "entity_type": etype,
-                        "entity_claim": claim
+                        "entity_claim": claim,
+                        "claim_date": claim_date
                     })
                 elif kind == "relationship":
-                    src, tgt, claim = fields
+                    src, tgt, claim = fields[:3]
+                    claim_date = fields[3] if len(fields) > 3 else None
+                                        
                     relationships.append({
                         "source_name": src,
                         "target_name": tgt,
-                        "relationship_claim": claim
+                        "relationship_claim": claim,
+                        "claim_date": claim_date
                     })
             except Exception as exc:
                 log.error("Failed to parse block: %s | Message: %s", block, exc)
@@ -350,6 +361,6 @@ class GraphBuilder:
         entities: list[dict], relationships: list[dict], date: Optional[str]=None, source: Optional[str]=None,
     ):
         return (
-            [{**e, "claim_date": date, "source": source} for e in entities],
-            [{**r, "claim_date": date, "source": source} for r in relationships]
+            [{**e, "source_date": date, "source": source} for e in entities],
+            [{**r, "source_date": date, "source": source} for r in relationships]
         )

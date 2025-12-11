@@ -94,6 +94,7 @@ class GraphIndex:
                     content TEXT NOT NULL,
                     source TEXT,
                     date_added TIMESTAMP DEFAULT NULL,
+                    source_date TEXT,
                     claim_date TEXT,
                     tags TEXT,
                     CHECK ((entity_id IS NULL) <> (relationship_id IS NULL)),
@@ -215,6 +216,7 @@ class GraphIndex:
         source: Optional[str],
         entity_name: Optional[str] = None,
         relationship: Optional[RelationshipRecord] = None,
+        source_date: Optional[str] = None,
         claim_date: Optional[str] = None,
     ) -> int:
         """Insert a claim associated with either an entity or a relationship."""
@@ -236,23 +238,51 @@ class GraphIndex:
                 relationship.directed
             )
         
-        if claim_date is None:
-            claim_date_iso8601 = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        else: # | TODO: kinder parsing
+        def _norm_date(val: Optional[str], default_to_now: bool) -> Optional[str]:
+            def _default():
+                return (
+                    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    if default_to_now
+                    else None
+                )
+            
+            if val is None:
+                return _default()
+
+            s = val.strip().replace("—", "-") # handle LLM relics
+            if len(s) == 4 and s.isdigit():
+                try:
+                    dt = datetime(int(s), 1, 1, tzinfo=timezone.utc)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    return _default()
+            if len(s) == 7 and s[4] == "-" and s[:4].isdigit() and s[5:7].isdigit():
+                try:
+                    dt = datetime(int(s[:4]), int(s[5:7]), 1, tzinfo=timezone.utc)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    return _default()
+
             try:
-                dt = datetime.fromisoformat(claim_date)
+                dt = datetime.fromisoformat(s)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                claim_date_iso8601 = dt.strftime("%Y-%m-%d %H:%M:%S")
-            except Exception: # fallback to now
-                claim_date_iso8601 = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return _default()
+
+        # source date should default to now if it is None or botched
+        source_date_iso8601 = _norm_date(source_date, default_to_now=True)
+
+        # claim date should not default to now
+        claim_date_iso8601 = _norm_date(claim_date, default_to_now=False)
         
         with self._conn() as con:
             cur = con.execute("""
-                INSERT INTO claims (entity_id, relationship_id, content, source, claim_date, date_added)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO claims (entity_id, relationship_id, content, source, source_date, claim_date, date_added)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 RETURNING id;
-            """, (entity_id, relationship_id, content, source, claim_date_iso8601))
+            """, (entity_id, relationship_id, content, source, source_date_iso8601, claim_date_iso8601))
             return cur.fetchone()[0]
 
 
@@ -356,7 +386,7 @@ class GraphIndex:
             # load claims from all these entity IDs
             id_placeholders = ','.join('?' * len(entity_id_list))
             rows = con.execute(f"""
-                SELECT content, source, date_added, claim_date
+                SELECT content, source, date_added, source_date, claim_date
                 FROM claims 
                 WHERE entity_id IN ({id_placeholders});
             """, entity_id_list).fetchall()
@@ -366,6 +396,7 @@ class GraphIndex:
                     content=row["content"],
                     source=row["source"],
                     date_added=row["date_added"],
+                    source_date=row["source_date"],
                     claim_date=row["claim_date"],
                     entities=[canonical]
                 )
@@ -472,7 +503,7 @@ class GraphIndex:
             
             placeholders = ",".join("?" * len(rel_ids))
             rows = con.execute(f"""
-                SELECT content, source, date_added, claim_date
+                SELECT content, source, source_date, claim_date, date_added
                 FROM claims
                 WHERE relationship_id IN ({placeholders});
             """, rel_ids).fetchall()
@@ -482,6 +513,7 @@ class GraphIndex:
                     content=row["content"],
                     source=row["source"],
                     date_added=row["date_added"],
+                    source_date=row["source_date"],
                     claim_date=row["claim_date"],
                     entities=[source_canonical, target_canonical]
                 )
@@ -1146,7 +1178,7 @@ class GraphIndex:
             entity_id = entity_row[0]
             
             rows = con.execute("""
-                SELECT content, source, date_added, claim_date
+                SELECT content, source, source_date, claim_date, date_added
                 FROM claims 
                 WHERE entity_id = ?;
             """, (entity_id,)).fetchall()
@@ -1156,6 +1188,7 @@ class GraphIndex:
                     content=row["content"],
                     source=row["source"],
                     date_added=row["date_added"],
+                    source_date=row["source_date"],
                     claim_date=row["claim_date"],
                     entities=[name]
                 )
