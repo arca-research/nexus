@@ -9,7 +9,7 @@ from asyncio import Semaphore
 
 # - local -
 from ..config import log, VectorDBConfig, GraphConfig, LLMConfig, HEAD
-from .state import VectorIndex, MetaIndex, GraphIndex
+from .state import VectorIndex, MetaIndex, GraphIndex, Checksums
 from .embed import Embedder
 from .llm import SyncLLM, AsyncLLM
 from .util import fetch_doc, chunk, print_progress_bar
@@ -137,8 +137,12 @@ class GraphBuilder:
         self.extraction_domains = self.graph_config.extraction_domains
         self.extraction_templates = self.graph_config.extraction_templates
         self.entity_templates = self.graph_config.entity_templates
-
+        
         self.extraction_concurrency = self.graph_config.extraction_concurrency
+
+        self.record_checksums = self.graph_config.record_checksums
+        self.force_checksums = self.graph_config.force_checksums
+        self.checksums = Checksums(self.graph_config.checksum_path)
 
         _backend = self.llm_config.backend
         _api_key = self.llm_config.api_key
@@ -187,6 +191,13 @@ class GraphBuilder:
             for j, doc in enumerate(batch):
                 current = i + j + 1
                 doc_text = fetch_doc(doc.filepath)
+
+                checksum = self.checksums.compute(doc_text)
+                if self.force_checksums:
+                    if self.checksums.has(checksum):
+                        log.warning("document in current batch has already been ingested; skipping")
+                        continue
+
                 prompt = self._build_extraction_prompt(
                     document=doc_text,
                     domain=doc.domain,
@@ -197,6 +208,10 @@ class GraphBuilder:
                     log.info("LLM response: %s", response)
                 e, r = self._process_llm_response(response)
                 e, r = self._add_metadata(entities=e, relationships=r, date=doc.date, source=doc.source)
+
+                if self.record_checksums:
+                    self.checksums.add(checksum)
+
                 entities_batch.extend(e)
                 relationships_batch.extend(r)
                 print_progress_bar(current, total)
@@ -211,6 +226,14 @@ class GraphBuilder:
         async def _process_doc(doc):
             async with sem:
                 doc_text = await asyncio.to_thread(fetch_doc, doc.filepath)
+
+                checksum = await asyncio.to_thread(self.checksums.compute, doc_text)
+                if self.force_checksums:
+                    exists = await asyncio.to_thread(self.checksums.has, checksum)
+                    if exists:
+                        log.warning("document in current batch has already been ingested; skipping")
+                        return None
+                
                 prompt = self._build_extraction_prompt(
                     document=doc_text,
                     domain=doc.domain,
@@ -220,13 +243,17 @@ class GraphBuilder:
                 if self.debug:
                     log.info("LLM response: %s", response)
                 e, r = await asyncio.to_thread(self._process_llm_response, response)
+
+                if self.record_checksums:
+                    await asyncio.to_thread(self.checksums.add, checksum)
+
                 return await asyncio.to_thread(self._add_metadata,
                     entities=e, relationships=r, date=doc.date, source=doc.source
                 )
         
         for i in range(0, len(docs), self.batch_size):
             batch = docs[i : i + self.batch_size]
-            results = await asyncio.gather(*[_process_doc(doc) for doc in batch])
+            results = [r for r in await asyncio.gather(*(_process_doc(doc) for doc in batch)) if r is not None]
 
             entities_batch, relationships_batch = [], []
             for e, r in results:

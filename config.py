@@ -67,7 +67,7 @@ class GraphConfig:
     graph_index_path: Path = None # set in __post_init__
     graph_meta_path: Path = None # set in __post_init__
 
-    max_tokens: int = 2056 # | TODO
+    max_tokens: int = 2056 # | TODO: chunking
 
     tuple_delimiter: str = "|"
     record_delimiter: str = "##"
@@ -95,9 +95,11 @@ class GraphConfig:
     system_prompt: str = "You are a helpful extraction assistant." # | TODO
 
     extraction_concurrency: Literal["sync", "async"] = "async"
-    extraction_llm_backend: Literal["openai", "openrouter", "local"] = "openai"
-
     extraction_batch_size: int = 10
+
+    checksum_path: Path = None # set in __post_init__
+    record_checksums: bool = True
+    force_checksums: bool = True # if True, won't allow re-ingestion
 
     def _load_extraction_templates(self):
         for domain in self.extraction_domains:
@@ -121,13 +123,16 @@ class GraphConfig:
             self.graph_index_path = self.stage_dir / "graph.sqlite"
         if self.graph_meta_path is None:
              self.graph_meta_path = self.stage_dir / "meta_graph.sqlite"
+        if self.checksum_path is None:
+            self.checksum_path = self.stage_dir / "checksums.sqlite"
         self._load_extraction_templates()
 
 
 @dataclass
 class LLMConfig:
-    sync_model: Optional[str] = "gpt-5-mini" # "qwen/qwen3-30b-a3b-2507"
-    async_model: Optional[str] = "gpt-5-mini"
+    backend: Literal["openai", "openrouter", "local"] = "openrouter"
+    sync_model: Optional[str] = "qwen/qwen3-235b-a22b-2507" # "qwen/qwen3-30b-a3b-2507"
+    async_model: Optional[str] = "qwen/qwen3-235b-a22b-2507"
     semaphore_rate: Optional[int] = 1
     local_backend_url: Optional[str] = "http://localhost:1234/v1"
 
@@ -137,4 +142,7 @@ class LLMConfig:
     api_key: str = None
     
     def __post_init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        if self.backend == "openai":
+            self.api_key = os.getenv("OPENAI_API_KEY")
+        elif self.backend == "openrouter":
+            self.api_key = os.getenv("OPENROUTER_API_KEY")

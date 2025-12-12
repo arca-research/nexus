@@ -1,4 +1,5 @@
-from .common import TEST_LOG, GRAPH_CONFIG, GRAPH_BUILDER
+from ._common import GRAPH_CONFIG, GRAPH_BUILDER
+from ._logger import TEST_LOG
 
 def test_process_llm_response():
     sample_llm_response_green = """

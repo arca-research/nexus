@@ -1,4 +1,5 @@
-from .common import TEST_LOG,  LLM_CONFIG
+from ._common import LLM_CONFIG
+from ._logger import TEST_LOG
 from ..src.llm import SyncLLM, AsyncLLM
 
 def test_openai():
