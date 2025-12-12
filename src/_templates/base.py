@@ -43,7 +43,34 @@ Only create relationships whose endpoints are both previously extracted entities
 Format each relationship as:
 ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_claim>)
 
-3) Output formatting
+3) Optional claim_date
+You may optionally include a claim_date for an entity or relationship when the text itself asserts or implies a temporal reference for the claim (e.g. “acquired XYZ in 2025”).
+claim_date rules:
+- Format in ISO 8601 when possible.
+- If the text gives only a year, use "YYYY" (e.g. "2025").
+- If the text gives year + month but no day, use "YYYY-MM".
+- If the text gives quarter notation (Q1, Q2, Q3, Q4), convert to the corresponding month range start:
+  - Q1 → "YYYY-01"
+  - Q2 → "YYYY-04"
+  - Q3 → "YYYY-07"
+  - Q4 → "YYYY-10"
+- If the text gives a full date, return "YYYY-MM-DD".
+When a claim_date is included, append it as the final field in the tuple.
+Revised formats:
+Entity:
+- ("entity"{tuple_delimiter}<entity_name>{tuple_delimiter}<entity_type>{tuple_delimiter}<entity_claim>{tuple_delimiter}<claim_date>)
+Relationship:
+- ("relationship"{tuple_delimiter}<source_entity>{tuple_delimiter}<target_entity>{tuple_delimiter}<relationship_claim>{tuple_delimiter}<claim_date>)
+Where [claim_date] is optional. If omitted, end the tuple after <entity_claim> or <relationship_claim> as before.
+If no clear claim date exists, omit it entirely.
+The key idea is that you are usually date-sourcing events.
+Take the claim: “The ministry announced in June 2025 that it would be under construction until November“
+- the claim_date here is `2025-06` (June 2025) and NOT `2025-11` (November).
+- If there is ambiguity, omit. claim_date is an important field and should not be filled by ambiguous information,
+however you are allowed “vague“ dates as shown above (i.e. `YYYY`, `YYYY-MM`, and quarterly dates transferred to ISO 8601.)
+Further examples are given below.
+
+4) Output formatting
 - Return all tuples as a single list, using **{record_delimiter}** between tuples.
 - Finish with: {completion_delimiter}
 
@@ -76,8 +103,8 @@ Good: ("relationship"{tuple_delimiter}FBI{tuple_delimiter}Mexico{tuple_delimiter
 
 -Example-
 **Document**:
-The Ministry of Urban Mobility of the Republic of Arcania announced on Tuesday that it would cancel the provisional award of a tramway rolling-stock contract to Polar Tram AG after the Office of the Auditor General of Arcania identified undisclosed subcontractor ties in the bid dossier.
-According to the ministry, a new tender will be issued for Sankt Rúna's Line A before the end of 2025. Deputy Mayor Mateo Ordoñez said the city would “welcome a clean retender.”
+The Ministry of Urban Mobility of the Republic of Arcania announced on Tuesday, August 16 that it would cancel the provisional award of a tramway rolling-stock contract to Polar Tram AG after the Office of the Auditor General of Arcania identified undisclosed subcontractor ties in the bid dossier.
+According to the ministry, a new tender will be issued for Sankt Rúna's Line A before the end of 2025. Deputy Mayor Mateo Ordoñez said on Wednesday that the city would “welcome a clean retender.”
 Polar Tram AG's chief executive, Leena Väisänen, stated that the company “complied with disclosure rules” and offered to fund an independent compliance audit.
 The Nordic Development Bank, which had been appraising a loan for the Sankt Rúna tramway, said its appraisal was suspended pending the audit findings.
 Transparency Watch Europa filed a procurement-integrity complaint citing conflicts arising from overlapping board memberships at two proposed subcontractors.
@@ -103,7 +130,7 @@ Polar Tram AG is headquartered in Rautenstadt and exports low-floor trams across
 {record_delimiter}
 ("entity"{tuple_delimiter}Rautenstadt{tuple_delimiter}GEO{tuple_delimiter}City serving as corporate headquarters of Polar Tram AG)
 {record_delimiter}
-("relationship"{tuple_delimiter}Ministry of Urban Mobility of the Republic of Arcania{tuple_delimiter}Polar Tram AG{tuple_delimiter}Cancelled the provisional award of a tramway rolling-stock contract after undisclosed subcontractor ties were identified)
+("relationship"{tuple_delimiter}Ministry of Urban Mobility of the Republic of Arcania{tuple_delimiter}Polar Tram AG{tuple_delimiter}Cancelled the provisional award of a tramway rolling-stock contract after undisclosed subcontractor ties were identified{tuple_delimiter}2025-08-16)
 {record_delimiter}
 ("relationship"{tuple_delimiter}Office of the Auditor General of Arcania{tuple_delimiter}Ministry of Urban Mobility of the Republic of Arcania{tuple_delimiter}Reported undisclosed subcontractor ties in the bid dossier that triggered the cancellation decision)
 {record_delimiter}
@@ -115,7 +142,7 @@ Polar Tram AG is headquartered in Rautenstadt and exports low-floor trams across
 {record_delimiter}
 ("relationship"{tuple_delimiter}Transparency Watch Europa{tuple_delimiter}Ministry of Urban Mobility of the Republic of Arcania{tuple_delimiter}Filed a procurement-integrity complaint citing conflicts from overlapping board memberships at proposed subcontractors)
 {record_delimiter}
-("relationship"{tuple_delimiter}Mateo Ordoñez{tuple_delimiter}Ministry of Urban Mobility of the Republic of Arcania{tuple_delimiter}Welcomed the decision to retender the contract)
+("relationship"{tuple_delimiter}Mateo Ordoñez{tuple_delimiter}Ministry of Urban Mobility of the Republic of Arcania{tuple_delimiter}Welcomed the decision to retender the contract{tuple_delimiter}2025-08-17)
 {completion_delimiter}
 
 -Real-

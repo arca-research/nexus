@@ -9,7 +9,7 @@ from asyncio import Semaphore
 
 # - local -
 from ..config import log, VectorDBConfig, GraphConfig, LLMConfig, HEAD
-from .state import VectorIndex, MetaIndex, GraphIndex
+from .state import VectorIndex, MetaIndex, GraphIndex, Checksums
 from .embed import Embedder
 from .llm import SyncLLM, AsyncLLM
 from .util import fetch_doc, chunk, print_progress_bar
@@ -137,10 +137,14 @@ class GraphBuilder:
         self.extraction_domains = self.graph_config.extraction_domains
         self.extraction_templates = self.graph_config.extraction_templates
         self.entity_templates = self.graph_config.entity_templates
-
+        
         self.extraction_concurrency = self.graph_config.extraction_concurrency
 
-        _backend = self.graph_config.extraction_llm_backend
+        self.record_checksums = self.graph_config.record_checksums
+        self.force_checksums = self.graph_config.force_checksums
+        self.checksums = Checksums(self.graph_config.checksum_path)
+
+        _backend = self.llm_config.backend
         _api_key = self.llm_config.api_key
         _url = self.llm_config.local_backend_url
         if self.extraction_concurrency == "sync":
@@ -187,6 +191,13 @@ class GraphBuilder:
             for j, doc in enumerate(batch):
                 current = i + j + 1
                 doc_text = fetch_doc(doc.filepath)
+
+                checksum = self.checksums.compute(doc_text)
+                if self.force_checksums:
+                    if self.checksums.has(checksum):
+                        log.warning("document in current batch has already been ingested; skipping")
+                        continue
+
                 prompt = self._build_extraction_prompt(
                     document=doc_text,
                     domain=doc.domain,
@@ -197,6 +208,10 @@ class GraphBuilder:
                     log.info("LLM response: %s", response)
                 e, r = self._process_llm_response(response)
                 e, r = self._add_metadata(entities=e, relationships=r, date=doc.date, source=doc.source)
+
+                if self.record_checksums:
+                    self.checksums.add(checksum)
+
                 entities_batch.extend(e)
                 relationships_batch.extend(r)
                 print_progress_bar(current, total)
@@ -211,6 +226,14 @@ class GraphBuilder:
         async def _process_doc(doc):
             async with sem:
                 doc_text = await asyncio.to_thread(fetch_doc, doc.filepath)
+
+                checksum = await asyncio.to_thread(self.checksums.compute, doc_text)
+                if self.force_checksums:
+                    exists = await asyncio.to_thread(self.checksums.has, checksum)
+                    if exists:
+                        log.warning("document in current batch has already been ingested; skipping")
+                        return None
+                
                 prompt = self._build_extraction_prompt(
                     document=doc_text,
                     domain=doc.domain,
@@ -220,13 +243,17 @@ class GraphBuilder:
                 if self.debug:
                     log.info("LLM response: %s", response)
                 e, r = await asyncio.to_thread(self._process_llm_response, response)
+
+                if self.record_checksums:
+                    await asyncio.to_thread(self.checksums.add, checksum)
+
                 return await asyncio.to_thread(self._add_metadata,
                     entities=e, relationships=r, date=doc.date, source=doc.source
                 )
         
         for i in range(0, len(docs), self.batch_size):
             batch = docs[i : i + self.batch_size]
-            results = await asyncio.gather(*[_process_doc(doc) for doc in batch])
+            results = [r for r in await asyncio.gather(*(_process_doc(doc) for doc in batch)) if r is not None]
 
             entities_batch, relationships_batch = [], []
             for e, r in results:
@@ -242,12 +269,13 @@ class GraphBuilder:
         for entity in entities:
             entity_name = entity["entity_name"]
             entity_type = entity["entity_type"]
+            source = entity.get("source", None)
+            source_date = entity.get("source_date", None)
             claim = entity.get("entity_claim")
             claim_date = entity.get("claim_date", None)
-            source = entity.get("source", None)
 
             self.graph_index.upsert_entity(name=entity_name, entity_type=entity_type)
-            self.graph_index.upsert_claim(content=claim,source=source, entity_name=entity_name, claim_date=claim_date)
+            self.graph_index.upsert_claim(content=claim,source=source, entity_name=entity_name, source_date=source_date, claim_date=claim_date)
 
 
     def _upsert_relationships(self, relationships: list[dict]):
@@ -255,10 +283,11 @@ class GraphBuilder:
         for relationship in relationships:
             source_name = relationship["source_name"]
             target_name = relationship["target_name"]
+            source = relationship.get("source", None)
+            source_date = relationship.get("source_date", None)
             claim = relationship["relationship_claim"]
             claim_date = relationship.get("claim_date", None)
-            source = relationship.get("source", None)
-
+            
             rel = RelationshipRecord(
                 source_name=source_name,
                 target_name=target_name,
@@ -275,10 +304,10 @@ class GraphBuilder:
                 log.info("Self-referential relationship detected between %s and %s: upserting to %s",
                     source_name, target_name, source_name # NOTE: not fully accurate... we upsert to _canon_ of source.
                 )
-                self.graph_index.upsert_claim(content=claim, source=source, entity_name=source_name, claim_date=claim_date)
+                self.graph_index.upsert_claim(content=claim, source=source, entity_name=source_name, source_date=source_date, claim_date=claim_date)
                 continue
 
-            self.graph_index.upsert_claim(content=claim, source=source, relationship=rel, claim_date=claim_date)
+            self.graph_index.upsert_claim(content=claim, source=source, relationship=rel, source_date=source_date, claim_date=claim_date)
 
 
     def _build_extraction_prompt(self,
@@ -326,19 +355,28 @@ class GraphBuilder:
                 kind = _clean(kind).lower()
                 fields = [_clean(f) for f in raw_fields]
 
+                if len(fields) < 3:
+                    raise ValueError("tuple missing required fields")
+
                 if kind == "entity":
-                    name, etype, claim = fields
+                    name, etype, claim = fields[:3]
+                    claim_date = fields[3] if len(fields) > 3 else None
+
                     entities.append({
                         "entity_name": name,
                         "entity_type": etype,
-                        "entity_claim": claim
+                        "entity_claim": claim,
+                        "claim_date": claim_date
                     })
                 elif kind == "relationship":
-                    src, tgt, claim = fields
+                    src, tgt, claim = fields[:3]
+                    claim_date = fields[3] if len(fields) > 3 else None
+
                     relationships.append({
                         "source_name": src,
                         "target_name": tgt,
-                        "relationship_claim": claim
+                        "relationship_claim": claim,
+                        "claim_date": claim_date
                     })
             except Exception as exc:
                 log.error("Failed to parse block: %s | Message: %s", block, exc)
@@ -350,6 +388,6 @@ class GraphBuilder:
         entities: list[dict], relationships: list[dict], date: Optional[str]=None, source: Optional[str]=None,
     ):
         return (
-            [{**e, "claim_date": date, "source": source} for e in entities],
-            [{**r, "claim_date": date, "source": source} for r in relationships]
+            [{**e, "source_date": date, "source": source} for e in entities],
+            [{**r, "source_date": date, "source": source} for r in relationships]
         )

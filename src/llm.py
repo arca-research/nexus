@@ -1,8 +1,6 @@
 """
 LLM primitives: SyncLLM and AsyncLLM
 
-TODO: add openrouter
-
 TODO: add logging of every call (to .nexus)
 """
 
@@ -47,7 +45,13 @@ class SyncLLM(_BaseLLM):
             except:
                 raise ValueError("OpenAI API key is not set in nexus/.env.")
         elif self.backend == "openrouter":
-            raise NotImplementedError("Openrouter is not yet supported.") # | TODO
+            try:
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=api_key
+                )
+            except:
+                raise ValueError("OpenRouter API key is not set in nexus/.env.")
         elif self.backend == "local":
             if url is None:
                 raise ValueError("Local LLM client url is not set in nexus/config.py")
@@ -96,7 +100,13 @@ class AsyncLLM(_BaseLLM):
             except:
                 raise ValueError("OpenAI API key is not set in nexus/.env.")
         elif self.backend == "openrouter":
-            raise NotImplementedError("Openrouter is not yet supported.") # | TODO
+            try:
+                self.client = AsyncOpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=api_key
+                )
+            except:
+                raise ValueError("OpenRouter API key is not set in nexus/.env.")
         elif self.backend == "local":
             if url is None:
                 raise ValueError("Local LLM client url is not set in nexus/config.py")
