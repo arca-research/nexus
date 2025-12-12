@@ -3,6 +3,7 @@ nexus utilities
 """
 
 from pathlib import Path
+import sys, threading
 
 from ..config import log
 from ._schemas import (ChunkData)
@@ -123,6 +124,26 @@ def print_progress_bar(current: int, total: int, width: int = 50):
     bar = '█' * filled + '░' * (width - filled)
     percent = int(progress * 100)
     print(f'\r[{bar}] {percent}% ({current}/{total})')
+
+
+class ProgressBar:
+    def __init__(self, total: int, width: int = 50):
+        self.total = total
+        self.width = width
+        self.done = 0
+        self._lock = threading.Lock()
+
+    def tick(self):
+        with self._lock:
+            self.done += 1
+            progress = self.done / self.total
+            filled = int(self.width * progress)
+            bar = '█' * filled + '░' * (self.width - filled)
+            percent = int(progress * 100)
+            sys.stdout.write(
+                f'\r[{bar}] {percent}% ({self.done}/{self.total})'
+            )
+            sys.stdout.flush()
 
 
 # ---

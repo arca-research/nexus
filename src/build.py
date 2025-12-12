@@ -12,7 +12,7 @@ from ..config import log, VectorDBConfig, GraphConfig, LLMConfig, HEAD
 from .state import VectorIndex, MetaIndex, GraphIndex, Checksums
 from .embed import Embedder
 from .llm import SyncLLM, AsyncLLM
-from .util import fetch_doc, chunk, print_progress_bar
+from .util import fetch_doc, chunk, print_progress_bar, ProgressBar
 from ._schemas import (
     ChunkData,
     DocLike, Doc,
@@ -182,14 +182,14 @@ class GraphBuilder:
     
     def _build_sync(self, docs: list[DocLike]):
         """"""
-        total = len(docs)
-        print_progress_bar(0, total)
+        progress = ProgressBar(total=len(docs))
+        print() # reserve line
+
         for i in range(0, len(docs), self.batch_size):
             batch = docs[i : i + self.batch_size]
             entities_batch, relationships_batch = [], []
 
             for j, doc in enumerate(batch):
-                current = i + j + 1
                 doc_text = fetch_doc(doc.filepath)
 
                 checksum = self.checksums.compute(doc_text)
@@ -214,7 +214,8 @@ class GraphBuilder:
 
                 entities_batch.extend(e)
                 relationships_batch.extend(r)
-                print_progress_bar(current, total)
+                
+                progress.tick()
 
             self._upsert_entities(entities_batch)
             self._upsert_relationships(relationships_batch)
@@ -223,6 +224,10 @@ class GraphBuilder:
     async def _build_async(self, docs: list[DocLike]):
         """"""
         sem = Semaphore(self.semaphore_rate)
+
+        progress = ProgressBar(len(docs))
+        print() # reserve line
+
         async def _process_doc(doc):
             async with sem:
                 doc_text = await asyncio.to_thread(fetch_doc, doc.filepath)
@@ -247,9 +252,12 @@ class GraphBuilder:
                 if self.record_checksums:
                     await asyncio.to_thread(self.checksums.add, checksum)
 
-                return await asyncio.to_thread(self._add_metadata,
+                result = await asyncio.to_thread(self._add_metadata,
                     entities=e, relationships=r, date=doc.date, source=doc.source
                 )
+
+                await asyncio.to_thread(progress.tick)
+                return result
         
         for i in range(0, len(docs), self.batch_size):
             batch = docs[i : i + self.batch_size]
